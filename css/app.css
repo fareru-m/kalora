@@ -450,7 +450,8 @@ details.info.on-dark .pop { background: #fff; color: var(--ink); }
 .bar-col .b.today { background: var(--ember-tint); border: 2px dashed var(--ember); }
 .bar-col:hover .b { filter: brightness(1.15); }
 .bar-col[aria-pressed=true] .b { box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--ink); }
-.bar-col .lbl { font-size: 11px; color: var(--muted); font-weight: 600; }
+.bar-col .lbl { font-size: 11px; line-height: 14px; height: 28px; white-space: nowrap; text-align: center; color: var(--muted); font-weight: 600; flex: none; }
+.bars.month .bar-col .lbl { height: 14px; }
 .bar-col[aria-pressed=true] .lbl { color: var(--ink); font-weight: 800; }
 .bar-col .val { font-size: 10px; font-weight: 800; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 @keyframes grow-y { from { transform: scaleY(0); } }

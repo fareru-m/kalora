@@ -801,14 +801,14 @@ async function viewRiwayat() {
   // --- grafik
   const vals = P.days.map((ds) => (ds <= t ? map.get(ds)?.kcal || 0 : null));
   const maxV = Math.max(T * 1.2, ...vals.filter((v) => v));
-  const PX = 150, BASE = 22;
+  const PX = 150, BASE = week ? 34 : 20; // BASE = tinggi label + jarak, harus sama dengan CSS .lbl
   const canNext = week ? H.anchor < t : toISO(new Date(parseISO(H.anchor).getFullYear(), parseISO(H.anchor).getMonth() + 1, 1)) <= t;
   const bars = P.days.map((ds, i) => {
     const v = vals[i];
     const dd = parseISO(ds);
     const future = v === null;
     const cls = future ? 'future' : ds === t ? 'today' : !v ? 'none' : v > T ? 'over' : '';
-    const lbl = week ? `${DAY3[dd.getDay()]} ${dd.getDate()}` : (dd.getDate() === 1 || dd.getDate() % 5 === 0 ? String(dd.getDate()) : '');
+    const lbl = week ? `${DAY3[dd.getDay()]}<br>${dd.getDate()}` : (dd.getDate() === 1 || dd.getDate() % 5 === 0 ? String(dd.getDate()) : '');
     return `<button class="bar-col" ${future ? 'disabled' : `data-act="hist-sel" data-date="${ds}"`} aria-pressed="${ds === H.sel}" aria-label="${midDate(ds)}${v ? ': ' + fmt0(v) + ' kkal' : ''}" style="--k:${i}">
       <span class="val">${week && v ? fmt0(v) : ''}</span>
       <span class="b ${cls}" style="height:${future ? 4 : Math.max(5, (v / maxV) * PX)}px"></span>
@@ -846,7 +846,7 @@ async function viewRiwayat() {
         <button class="icon-btn" data-act="${week ? 'hist-shift' : 'hist-month'}" data-n="${week ? 7 : 1}" aria-label="Periode berikutnya" ${canNext ? '' : 'disabled style="opacity:.4"'}>${icon('right', 18)}</button>
       </div>
     </div>
-    <div class="bars ${week ? '' : 'month'}" style="height:${PX + 58}px;grid-template-columns:repeat(${P.days.length}, minmax(0, 1fr))" role="group" aria-label="Kalori per hari, rata-rata ${fmt0(s.avg)} kkal">
+    <div class="bars ${week ? '' : 'month'}" style="height:${PX + BASE + 40}px;grid-template-columns:repeat(${P.days.length}, minmax(0, 1fr))" role="group" aria-label="Kalori per hari, rata-rata ${fmt0(s.avg)} kkal">
       <div class="target" style="bottom:${BASE + (T / maxV) * PX}px"></div>
       ${s.n ? `<div class="avg" style="bottom:${BASE + (s.avg / maxV) * PX}px"></div>` : ''}
       ${bars}

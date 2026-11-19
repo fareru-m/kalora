@@ -7,7 +7,7 @@
 // =============================================================
 export const CONFIG = {
   APP_NAME: 'Kalora',
-  VERSION: '1.0.0',
+  VERSION: '1.2.0',
 
   // Firebase Console → Project settings → General → Your apps → SDK setup and configuration → Config
   FIREBASE: {
@@ -23,5 +23,5 @@ export const CONFIG = {
   VAPID_KEY: 'BKhq8zDdBUYrVnFmaG8A-FBk0BoTXyelwoDLzTH1a8wLfGCjCSPMD-HIDUZHQU6A8v5BEi5S1-blT7Eo_r8SRW4',
 
   // Versi Firebase JS SDK yang dimuat dari CDN gstatic
-  FIREBASE_SDK_VERSION: '13.2.0',
+  FIREBASE_SDK_VERSION: '13.4.0',
 };

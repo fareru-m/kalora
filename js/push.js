@@ -31,7 +31,7 @@ export async function sendConfToSW() {
   reg.active?.postMessage(msg);
 }
 
-function deviceLabel() {
+export function deviceLabel() {
   const ua = navigator.userAgent;
   const os = /iphone|ipad/i.test(ua) ? 'iPhone/iPad' : /android/i.test(ua) ? 'Android' : /mac/i.test(ua) ? 'Mac' : /windows/i.test(ua) ? 'Windows' : 'Perangkat';
   const br = /edg\//i.test(ua) ? 'Edge' : /chrome|crios/i.test(ua) ? 'Chrome' : /safari/i.test(ua) ? 'Safari' : /firefox/i.test(ua) ? 'Firefox' : 'Browser';
@@ -71,6 +71,7 @@ export async function enablePush() {
   if (!token) throw new Error('Gagal mendapatkan token perangkat.');
   await call('registerDevice', { fcmToken: token, label: deviceLabel() });
   localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem('kalora.fcmCheckedAt', String(Date.now()));
   return token;
 }
 
@@ -79,6 +80,9 @@ export async function refreshPush() {
   try {
     if (conn.demo || !conn.ready || !firebaseReady() || !pushSupported()) return;
     if (Notification.permission !== 'granted' || !hasToken()) return;
+    const last = Number(localStorage.getItem('kalora.fcmCheckedAt') || 0);
+    if (Date.now() - last < 24 * 3600e3) return; // cukup sekali sehari, supaya app tidak berat saat dibuka
+    localStorage.setItem('kalora.fcmCheckedAt', String(Date.now()));
     const token = await getFcmToken();
     if (token && token !== localStorage.getItem(TOKEN_KEY)) {
       await call('registerDevice', { fcmToken: token, label: deviceLabel() });

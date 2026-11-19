@@ -127,7 +127,7 @@ function view(db, r, date) {
     v.doneAt = st.doneAt ? hm(new Date(st.doneAt)) : '';
   } else if (now >= at(date, r.time)) {
     v.status = 'pending';
-    if (r.type === 'kebiasaan' && r.repeatMin > 0) {
+    if (r.repeatMin > 0) {
       const n = Math.floor((now - at(date, r.time)) / (r.repeatMin * 60000)) + 1;
       v.sentCount = n;
       v.nextAt = hm(new Date(at(date, r.time).getTime() + n * r.repeatMin * 60000));
@@ -137,8 +137,7 @@ function view(db, r, date) {
   return v;
 }
 function views(db, date) {
-  const d = dow(date);
-  return db.reminders.filter((r) => r.enabled && r.days[d] === '1').sort((a, b) => a.order - b.order).map((r) => view(db, r, date));
+  return db.reminders.filter((r) => r.enabled).sort((a, b) => a.time.localeCompare(b.time)).map((r) => view(db, r, date));
 }
 
 // ---- AI tiruan -------------------------------------------------
@@ -296,7 +295,7 @@ const A = {
     const r = p.reminder || {};
     const obj = {
       id: r.id || 'k-' + id(), type: r.type === 'makan' ? 'makan' : 'kebiasaan', title: String(r.title || 'Pengingat').slice(0, 60),
-      time: r.time || '08:00', repeatMin: Math.max(0, parseInt(r.repeatMin, 10) || 0), days: /^[01]{7}$/.test(r.days) ? r.days : '1111111',
+      time: r.time || '08:00', repeatMin: Math.max(0, parseInt(r.repeatMin, 10) || 0), days: '1111111',
       enabled: r.enabled !== false, order: r.order || 99,
     };
     const i = db.reminders.findIndex((x) => x.id === obj.id);

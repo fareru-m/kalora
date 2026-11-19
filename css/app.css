@@ -607,3 +607,85 @@ body.no-chrome #toast-host { top: calc(16px + var(--safe-t)); bottom: auto; }
 code { font-size: .92em; background: rgba(127, 127, 127, .15); padding: 1px 5px; border-radius: 6px; }
 /* popover info selalu di atas kartu berikutnya */
 .view > *:has(details.info[open]), .col > *:has(details.info[open]) { position: relative; z-index: 50; }
+
+/* =============================================================
+   v1.2 — Revisi 2
+   ============================================================= */
+.icon-btn.ink { background: var(--ink); color: #fff; border-color: var(--ink); box-shadow: var(--sh-ink); }
+.icon-btn.ink:hover { color: #fff; }
+.icon-btn.soft { width: 40px; height: 40px; border-radius: 12px; background: var(--soft); border-color: transparent; box-shadow: none; }
+.icon-btn.soft:hover { background: #E9EBE4; box-shadow: none; }
+.dot-badge { position: absolute; top: 9px; right: 10px; width: 9px; height: 9px; border-radius: 99px; border: 2px solid #fff; }
+.danger-text { color: #B42318; }
+.danger-text:hover { color: #B42318; background: #FDECEC; }
+.notice-btn { width: 100%; border: 0; cursor: pointer; text-align: left; font: inherit; align-items: center; transition: background .2s; }
+.notice-btn:hover { background: #E6E8E1; }
+.notice-btn span { flex: 1; }
+
+/* Hari ini: pengingat */
+.today-rems { padding: 0; overflow: hidden; }
+.tr-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line-2); transition: background .25s; }
+.tr-row.due { background: #EEF8F2; border-bottom-color: #DCEFE5; }
+.tr-row.due.meal { background: var(--ember-soft); border-bottom-color: #FFE2D3; }
+.tr-row .t { width: 54px; flex-shrink: 0; font-size: 18px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.tr-name { display: block; font-size: 14px; font-weight: 800; color: var(--ink); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.tr-name:hover { color: var(--ink); text-decoration: underline; }
+.tr-row .due-sub { color: var(--mint-ink); }
+.tr-row.meal .due-sub { color: var(--ember-text); }
+.tr-done { display: flex; align-items: center; gap: 10px; padding: 11px 14px; font-size: 12px; font-weight: 600; color: var(--muted); }
+
+/* Riwayat */
+.recap { border-radius: var(--r-xl); padding: 20px; display: flex; flex-direction: column; gap: 10px; position: relative; overflow: hidden; }
+.recap::before { content: ""; position: absolute; width: 240px; height: 240px; right: -80px; top: -110px; border-radius: 50%; background: radial-gradient(circle, rgba(255, 91, 34, .32), rgba(255, 91, 34, 0) 70%); animation: glow 6s ease-in-out infinite alternate; pointer-events: none; }
+.recap p { position: relative; font-size: 16px; font-weight: 600; line-height: 1.5; }
+.recap .chips { position: relative; display: flex; flex-wrap: wrap; gap: 6px; }
+.recap .chips span { font-size: 11px; font-weight: 800; background: var(--ink-2); color: var(--ember-light); border-radius: 999px; padding: 5px 10px; }
+.recap .chips span.good { color: #9EE6C5; }
+@media (min-width: 960px) { .recap { padding: 26px 28px; } .recap p { font-size: 19px; } }
+.seg.full { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 720px) { .seg.full { display: inline-grid; align-self: flex-start; min-width: 300px; } }
+.bars .avg { position: absolute; left: 0; right: 0; border-top: 2px solid var(--protein); pointer-events: none; z-index: 1; }
+.bars.month { gap: 3px; }
+.bars.month .b { border-radius: 4px; }
+.bars.month .val { display: none; }
+.bar-col[disabled] { cursor: default; }
+.bar-col .b.future { background: var(--soft); }
+.stats3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stats3 .stat { padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; }
+.stats3 .v { font-size: 21px; font-weight: 800; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+@media (min-width: 720px) { .stats3 { gap: 12px; } .stats3 .stat { padding: 16px 18px; } .stats3 .v { font-size: 27px; } }
+.jump.wide { padding: 6px 6px 6px 14px; }
+.jump.wide .lbl { flex: 1; font-size: 14px; font-weight: 700; }
+.day-card { padding: 0; overflow: hidden; }
+.day-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px; background: var(--soft-2); border-bottom: 1px solid var(--line-2); }
+.day-foods { padding: 4px 16px 8px; }
+.day-foods a { display: flex; align-items: center; gap: 10px; min-height: 52px; border-bottom: 1px solid var(--line-2); color: var(--ink); text-decoration: none; transition: background .2s; }
+.day-foods a:last-child { border-bottom: 0; }
+.day-foods a:hover { color: var(--ink); background: var(--soft-2); }
+
+/* Pengingat */
+.rem-layout { display: grid; gap: 14px; }
+.rem-panel { display: none; }
+@media (min-width: 1100px) {
+  .rem-layout { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: start; }
+  .rem-panel { display: block; position: sticky; top: 24px; box-shadow: var(--sh-2); }
+  .rem-row.sel { background: var(--ember-soft); box-shadow: inset 3px 0 0 var(--ember); }
+}
+.rem-list { padding: 0; overflow: hidden; }
+.rem-row { display: flex; align-items: center; gap: 12px; padding: 14px; border-bottom: 1px solid var(--line-2); transition: background .2s, opacity .25s; animation: rise .4s var(--ease) both; }
+.rem-row:last-child { border-bottom: 0; }
+.rem-row.off .rem-ic, .rem-row.off .grow { opacity: .45; }
+.rem-ic { width: 42px; height: 42px; border-radius: 14px; display: grid; place-items: center; flex-shrink: 0; }
+.rem-ic.pill { background: var(--mint-soft); color: var(--mint-text); }
+.rem-ic.meal { background: var(--ember-soft); color: var(--ember-text); }
+.rem-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.rem-top b { font-size: 20px; letter-spacing: -.02em; }
+.rem-name { font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.opts button { height: 42px; border-radius: 12px; border: 1px solid var(--line); background: #fff; font-size: 13px; font-weight: 700; color: var(--muted-2); cursor: pointer; transition: background .2s, color .2s, border-color .2s, transform .15s var(--ease); }
+.opts button[aria-pressed=true] { background: var(--ink); color: #fff; border-color: var(--ink); }
+.opts button:active { transform: scale(.94); }
+.rem-time { display: block; font-size: 21px; letter-spacing: -.02em; line-height: 1.15; }
+.rem-row .rem-name { display: block; }
+.bars .val { position: relative; z-index: 2; background: var(--surface); padding: 0 3px; border-radius: 4px; }
+body:has(.sheet-backdrop) #toast-host { top: calc(16px + var(--safe-t)); bottom: auto; }

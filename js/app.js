@@ -1,7 +1,7 @@
 // =============================================================
 //  KALORA — aplikasi utama (vanilla JS, tanpa build step)
 // =============================================================
-import { call, conn } from './api.js';
+import { call, conn, cache } from './api.js';
 import { CONFIG } from './config.js';
 import { resetDemo } from './demo.js';
 import * as push from './push.js';
@@ -67,6 +67,7 @@ const P = {
   logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
   alert: '<path d="M12 6v7M12 17v.01"/>',
   phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18h2"/>',
+  meal: '<path d="M7 3v8M5 3v5a2 2 0 0 0 4 0V3M7 11v10M17 21V3c-2 0-4 2-4 7v4h4"/>',
 };
 const icon = (n, s = 22, sw = 2) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n] || ''}</svg>`;
 const FLAME = 'M60 110 A36 36 0 0 1 24 74 C24 52 40 40 46 22 C49 14 54 8 60 2 C62 12 68 22 74 26 C76 20 78 16 82 10 C92 28 96 50 96 74 A36 36 0 0 1 60 110 Z';
@@ -108,32 +109,69 @@ const S = {
   busy: false,
 };
 
+/* Ambil data: tampilkan versi tersimpan di HP dulu (instan), lalu segarkan dari server. */
+function swr(key, fetcher, onFresh, force = false) {
+  const fresh = fetcher().then((v) => { if (!conn.demo) cache.set(key, v); return v; });
+  const c = force || conn.demo ? null : cache.get(key);
+  if (!c) return fresh;
+  fresh.then((v) => { if (JSON.stringify(v) !== JSON.stringify(c)) onFresh(v); }).catch(() => {});
+  return Promise.resolve(c);
+}
+// Render ulang diam-diam hanya kalau pengguna masih di layar itu & tidak sedang mengisi sesuatu
+function refreshIf(paths, cond = () => true) {
+  const { path } = parseHash();
+  if (!paths.includes(path) || !cond() || $('#sheet-host .sheet') || document.activeElement?.matches('input, textarea, select')) return;
+  rerender();
+}
+
 async function loadDay(date, force = false) {
   if (!force && S.days.has(date)) return S.days.get(date);
   const end = minDate(today(), addDays(date, 3));
-  const d = await call('getDay', { date, from: addDays(end, -6), to: end });
+  const d = await swr('day:' + date, () => call('getDay', { date, from: addDays(end, -6), to: end }), (v) => {
+    S.days.set(date, v);
+    S.settings = v.settings;
+    refreshIf(['', 'riwayat'], () => S.date === date || S.hist.sel === date);
+  }, force);
   S.days.set(date, d);
   S.settings = d.settings;
   return d;
 }
+function setHistory(r) {
+  S.history = { map: new Map(r.days.map((x) => [x.date, x])), settings: r.settings };
+  S.settings = r.settings;
+}
 async function loadHistory(force = false) {
   if (S.history && !force) return S.history;
   const to = today();
-  const r = await call('getHistory', { from: addDays(to, -370), to });
-  S.history = { map: new Map(r.days.map((x) => [x.date, x])), settings: r.settings };
-  S.settings = r.settings;
+  const r = await swr('hist', () => call('getHistory', { from: addDays(to, -370), to }), (v) => { setHistory(v); refreshIf(['riwayat']); }, force);
+  setHistory(r);
   return S.history;
 }
 async function loadReminders(force = false) {
   if (S.rem && !force) return S.rem;
-  S.rem = await call('getReminders');
+  S.rem = await swr('rem', () => call('getReminders'), (v) => { S.rem = v; refreshIf(['pengingat', 'konfirmasi']); }, force);
   return S.rem;
+}
+function forgetReminders() {
+  S.rem = null;
+  S.days.delete(today());
+  cache.del('rem');
+  cache.del('day:' + today());
 }
 function invalidateFood(date) {
   S.days.delete(date);
   S.days.delete(today());
   S.kilas.delete(date);
   S.history = null;
+  ['day:' + date, 'day:' + today(), 'kilas:' + date, 'hist'].forEach((k) => cache.del(k));
+}
+// buang cache hari lama supaya penyimpanan HP tidak menumpuk
+function pruneCache() {
+  const keep = addDays(today(), -8);
+  Object.keys(localStorage).forEach((k) => {
+    const m = k.match(/^kalora\.cache\.(?:day|kilas):(\d{4}-\d{2}-\d{2})$/);
+    if (m && m[1] < keep) localStorage.removeItem(k);
+  });
 }
 
 /* ---------------- UI helper ---------------- */
@@ -312,47 +350,26 @@ function viewSetup() {
  *  VIEW: HARI INI
  * ============================================================= */
 async function viewHome() {
+  S.date = today();
   const date = S.date;
-  const isToday = date === today();
   const d = await loadDay(date);
-  const st = d.settings;
-  const T = d.totals;
-  const end = minDate(today(), addDays(date, 3));
-  const stripMap = new Map(d.strip.map((x) => [x.date, x.kcal]));
-  const strip = Array.from({ length: 7 }, (_, i) => {
-    const ds = addDays(end, i - 6);
-    const k = stripMap.get(ds) || 0;
-    const cls = k > st.targetKcal ? 'over' : k > 0 ? 'ok' : '';
-    const dd = parseISO(ds);
-    return `<button class="day-pill" data-act="pick-day" data-date="${ds}" ${ds === date ? 'aria-current="date"' : ''} aria-label="${midDate(ds)}">${DAY3[dd.getDay()]}<b>${dd.getDate()}</b><i class="${cls}"></i></button>`;
-  }).join('');
-
-  const habits = isToday ? d.reminders.filter((r) => r.type === 'kebiasaan') : [];
-  const foodsHtml = foodsSection(d, isToday);
-
   return `
   <header class="home-head">
     <div class="who">
       <div class="mobile-only">${logo(42)}</div>
       <div class="stack" style="gap:1px">
         <span class="small muted" style="font-weight:600">${longDate(date)}</span>
-        <h1>${isToday ? greet() : 'Catatan ' + shortDate(date)}</h1>
+        <h1>${greet()}</h1>
       </div>
     </div>
-    <div class="row" style="gap:8px">
-      ${!isToday ? `<button class="btn btn-sm btn-soft" data-act="go-today">Hari ini</button>` : ''}
-      <label class="icon-btn" aria-label="Loncat ke tanggal">${icon('calendar', 20)}<input type="date" data-on="pick-date" value="${date}" max="${today()}" min="${addDays(today(), -365)}" aria-label="Pilih tanggal"></label>
-      <a class="icon-btn mobile-only" href="#/pengaturan" aria-label="Pengaturan">${icon('gear', 20)}</a>
-    </div>
+    <a class="icon-btn mobile-only" href="#/pengaturan" aria-label="Pengaturan">${icon('gear', 20)}</a>
   </header>
-  <div class="week-strip" role="group" aria-label="Pilih hari">${strip}</div>
   <div class="home-grid">
     <div class="col">
-      ${ringCard(T, st)}
-      ${habits.map(habitCard).join('')}
-      ${kilasTeaser(d)}
+      ${ringCard(d.totals, d.settings)}
+      ${todayReminders(d.reminders || [])}
     </div>
-    <div class="col">${foodsHtml}</div>
+    <div class="col">${foodsSection(d, true)}</div>
   </div>`;
 }
 
@@ -365,7 +382,7 @@ function ringCard(T, st) {
     const p = tgt ? Math.min(100, (v / tgt) * 100) : 0;
     return `<div class="macro"><div class="top"><span style="font-weight:700">${name}</span><span class="muted num">${fmt0(v)}/${fmt0(tgt)} g</span></div><div class="meter"><span style="width:${p}%;background:${color}"></span></div></div>`;
   };
-  return `<section class="card ring-card" aria-label="Kalori">
+  return `<section class="card ring-card" aria-label="Kalori hari ini">
     <div class="ring ${over ? 'over' : ''}">
       <svg width="148" height="148" viewBox="0 0 148 148" role="img" aria-label="${fmt0(T.kcal)} dari ${fmt0(st.targetKcal)} kkal">
         <circle class="track" cx="74" cy="74" r="${R}" fill="none" stroke-width="16"/>
@@ -385,48 +402,41 @@ function ringCard(T, st) {
   </section>`;
 }
 
-function habitStatusText(v) {
-  if (v.status === 'done') return `Selesai ${v.doneAt || ''}`.trim();
-  if (v.status === 'snoozed') return `Ditunda sampai ${v.nextAt}`;
-  if (v.status === 'nanti') return `Nanti jam ${v.time}`;
-  const parts = [`Jadwal ${v.time}`, 'belum ditandai'];
-  if (v.repeatMin > 0 && v.nextAt) parts.push(`diingatkan lagi ${v.nextAt}`);
-  return parts.join(' · ');
-}
+const repeatShort = (m) => (m >= 60 ? `${m / 60} jam` : `${m} menit`);
 
-function habitCard(v) {
-  if (v.status === 'done' || v.status === 'nanti') {
-    return `<div class="habit-mini">
-      <span class="k-ic" style="background:${v.status === 'done' ? 'var(--mint-soft);color:var(--mint-text)' : 'var(--soft);color:var(--muted)'}">${icon(v.status === 'done' ? 'check' : 'clock', 15, 2.6)}</span>
-      <span class="grow"><b>${esc(v.title)}</b> <span class="muted">· ${habitStatusText(v)}</span></span>
-      ${v.status === 'done' ? `<button class="btn btn-sm btn-ghost" data-act="rem-undo" data-rid="${esc(v.rid)}">Batalkan</button>` : ''}
-    </div>`;
-  }
-  return `<section class="card card-mint habit-card stack" aria-label="${esc(v.title)}">
-    <div class="row">
-      <div class="ic">${icon('pill', 22)}</div>
-      <div class="grow"><div style="font-weight:800">${esc(v.title)}</div><div class="small" style="color:var(--mint-ink)">${habitStatusText(v)}</div></div>
-    </div>
-    <div class="row" style="gap:8px">
-      <button class="btn btn-ink grow" data-act="rem-done" data-rid="${esc(v.rid)}">${icon('check', 18, 2.6)}Sudah</button>
-      <button class="btn btn-white" data-act="rem-snooze" data-rid="${esc(v.rid)}">Tunda</button>
+function todayReminders(views) {
+  const head = `<div class="row-between"><h2>Pengingat hari ini</h2><a href="#/pengingat" class="small" style="font-weight:700;text-decoration:none">Atur</a></div>`;
+  if (!views.length) return `<section class="stack">${head}<div class="empty small">Belum ada pengingat aktif. <a href="#/pengingat">Tambah pengingat</a></div></section>`;
+  const sorted = [...views].sort((a, b) => a.time.localeCompare(b.time));
+  const done = sorted.filter((v) => v.status === 'done');
+  const rest = sorted.filter((v) => v.status !== 'done');
+  const row = (v) => {
+    const meal = v.type === 'makan';
+    const due = v.status === 'pending' || v.status === 'snoozed' || v.status === 'sent';
+    let sub;
+    if (v.status === 'snoozed') sub = `Ditunda sampai ${v.nextAt}`;
+    else if (due && meal) sub = v.repeatMin > 0 && v.status === 'pending' ? `Belum ada catatan · diulang ${v.nextAt}` : 'Belum ada catatan makan';
+    else if (due) sub = `Belum ditandai${v.repeatMin > 0 && v.nextAt ? ` · diulang ${v.nextAt}` : ''}`;
+    else sub = `Akan berbunyi${v.repeatMin > 0 ? ` · ulang tiap ${repeatShort(v.repeatMin)}` : ''}`;
+    const action = !due
+      ? '<span class="badge">Nanti</span>'
+      : meal
+        ? `<a class="btn btn-sm btn-ember" href="#/tambah">Catat</a>`
+        : `<button class="btn btn-sm btn-ink" data-act="rem-done" data-rid="${esc(v.rid)}">Sudah</button>`;
+    const title = meal || !due ? `<b class="tr-name">${esc(v.title)}</b>` : `<a class="tr-name" href="#/konfirmasi?rid=${encodeURIComponent(v.rid)}">${esc(v.title)}</a>`;
+    return `<div class="tr-row ${due ? 'due' : ''} ${meal ? 'meal' : ''}"><span class="t">${esc(v.time)}</span><div class="grow">${title}<div class="small ${due ? 'due-sub' : 'muted'}">${sub}</div></div>${action}</div>`;
+  };
+  return `<section class="stack" aria-label="Pengingat hari ini">${head}
+    <div class="card today-rems">
+      ${rest.map(row).join('')}
+      ${done.length ? `<div class="tr-done"><span class="k-ic" style="width:22px;height:22px;background:var(--mint-soft);color:var(--mint-text)">${icon('check', 13, 3)}</span><span>${done.length} selesai: ${done.map((v) => esc(v.title)).join(', ')}</span></div>` : ''}
     </div>
   </section>`;
 }
 
-function kilasTeaser(d) {
-  if (!d.foods.length && !d.kilas) return '';
-  const text = d.kilas?.ringkasan || 'Ketuk untuk membuat rangkuman hari ini dan saran makan berikutnya.';
-  return `<a class="card card-dark kilas-teaser lift" href="#/kilas">
-    <span class="eyebrow light">Kilas Harian</span>
-    <span style="font-size:15px;font-weight:600;line-height:1.5">${esc(text)}</span>
-    <span class="small" style="font-weight:800;color:var(--ember-light)">${d.kilas ? 'Lihat recap lengkap →' : 'Buat Kilas Harian →'}</span>
-  </a>`;
-}
-
 function foodsSection(d, isToday) {
   const head = `<div class="row-between"><h2>${isToday ? 'Makanan hari ini' : 'Makanan'}</h2>
-    <div class="row" style="gap:4px"><span class="small muted">${d.detailAvailable ? `${d.foods.length} catatan` : ''}</span>${info('Rincian makanan disimpan 7 hari, lalu terhapus otomatis. Total kalori harian tetap tersimpan sampai 1 tahun. Ketuk catatan untuk mengubah atau menghapus.', 'penyimpanan')}</div></div>`;
+    <div class="row" style="gap:4px"><span class="small muted">${d.detailAvailable ? `${d.foods.length} catatan · ${fmt0(d.totals.kcal)} kkal` : ''}</span>${info('Rincian makanan disimpan 7 hari, lalu terhapus otomatis. Total kalori harian tetap tersimpan sampai 1 tahun. Ketuk catatan untuk mengubah atau menghapus.', 'penyimpanan')}</div></div>`;
   if (!d.detailAvailable) {
     return `<section class="stack">${head}<div class="notice">${icon('clock', 18)}<span>Rincian makanan tanggal ini sudah dihapus otomatis. Total kalorinya (${fmt0(d.totals.kcal)} kkal) tetap tersimpan.</span></div></section>`;
   }
@@ -723,149 +733,157 @@ async function saveDraft(btn) {
 /* =============================================================
  *  VIEW: RIWAYAT
  * ============================================================= */
-function statusOf(k, T) {
-  if (!k) return ['', 'Tidak tercatat'];
-  if (k > T) return ['ember', `Lewat target +${fmt0(k - T)}`];
-  if (k < T * 0.75) return ['', 'Di bawah target'];
-  return ['mint', 'Sesuai target'];
+function dateRange(from, to) {
+  const out = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+function periodOf(tab, anchor) {
+  if (tab === 'bulan') {
+    const a = parseISO(anchor);
+    const y = a.getFullYear(), m = a.getMonth();
+    return {
+      days: dateRange(toISO(new Date(y, m, 1)), toISO(new Date(y, m + 1, 0))),
+      prev: dateRange(toISO(new Date(y, m - 1, 1)), toISO(new Date(y, m, 0))),
+      label: `${MON[m]} ${y}`,
+    };
+  }
+  return {
+    days: dateRange(addDays(anchor, -6), anchor),
+    prev: dateRange(addDays(anchor, -13), addDays(anchor, -7)),
+    label: `${shortDate(addDays(anchor, -6))} – ${shortDate(anchor)}`,
+  };
+}
+function periodStats(days, map, T) {
+  const t = today();
+  const logged = days.filter((ds) => ds < t && (map.get(ds)?.kcal || 0) > 0);
+  const k = (ds) => map.get(ds)?.kcal || 0;
+  const n = logged.length;
+  const avg = n ? logged.reduce((a, ds) => a + k(ds), 0) / n : 0;
+  const pDays = logged.filter((ds) => (map.get(ds)?.protein || 0) > 0);
+  const avgP = pDays.length ? pDays.reduce((a, ds) => a + map.get(ds).protein, 0) / pDays.length : 0;
+  const ok = logged.filter((ds) => k(ds) <= T).length;
+  const top = logged.reduce((m, ds) => (!m || k(ds) > k(m) ? ds : m), null);
+  return { n, avg, avgP, ok, over: n - ok, top, topK: top ? k(top) : 0 };
 }
 
 async function viewRiwayat() {
   const h = await loadHistory();
   const H = S.hist;
-  const T = h.settings.targetKcal;
+  if (H.tab !== 'minggu' && H.tab !== 'bulan') H.tab = 'minggu';
+  const st = h.settings;
+  const T = st.targetKcal;
   const map = h.map;
   const t = today();
-  const k = (ds) => map.get(ds)?.kcal || 0;
+  const week = H.tab === 'minggu';
+  const P = periodOf(H.tab, H.anchor);
+  const s = periodStats(P.days, map, T);
+  const prev = periodStats(P.prev, map, T);
 
-  // rentang statistik
-  let from, to, label;
-  if (H.tab === 'minggu') { to = H.anchor; from = addDays(to, -6); label = '7 hari'; }
-  else if (H.tab === 'bulan') { const a = parseISO(H.anchor); from = toISO(new Date(a.getFullYear(), a.getMonth(), 1)); to = minDate(t, toISO(new Date(a.getFullYear(), a.getMonth() + 1, 0))); label = MON3[a.getMonth()] + ' ' + a.getFullYear(); }
-  else { to = t; from = addDays(t, -364); label = 'setahun'; }
-  const days = [];
-  for (let ds = from; ds <= to; ds = addDays(ds, 1)) days.push(ds);
-  const logged = days.filter((ds) => k(ds) > 0 && ds !== t);
-  const avg = logged.length ? logged.reduce((a, ds) => a + k(ds), 0) / logged.length : 0;
-  const okDays = logged.filter((ds) => k(ds) <= T).length;
-  const top = logged.reduce((m, ds) => (k(ds) > (m ? k(m) : 0) ? ds : m), null);
-  let streak = 0;
-  for (let ds = k(t) ? t : addDays(t, -1); k(ds) > 0; ds = addDays(ds, -1)) streak++;
+  // --- recap
+  let recap;
+  if (!s.n) recap = 'Belum ada data lengkap di periode ini. Catat makananmu tiap hari supaya recap-nya bisa dibuat.';
+  else {
+    const td = s.top ? parseISO(s.top) : null;
+    recap = `Rata-rata ${fmt0(s.avg)} kkal/hari — ${s.ok} dari ${s.n} hari sesuai target.`;
+    if (s.over && td) recap += ` Tertinggi ${DAY[td.getDay()]}, ${td.getDate()} ${MON3[td.getMonth()]} (${fmt0(s.topK)} kkal).`;
+    if (s.avgP) recap += ` Protein rata-rata ${fmt0(s.avgP)} g${s.avgP < st.targetProtein * 0.9 ? `, masih di bawah target ${fmt0(st.targetProtein)} g` : ''}.`;
+  }
+  const chips = [];
+  if (s.n && prev.n) {
+    const diff = Math.round(((s.avg - prev.avg) / prev.avg) * 100);
+    chips.push([`${diff >= 0 ? '↑' : '↓'} ${Math.abs(diff)}% dari ${week ? 'minggu' : 'bulan'} lalu`, '']);
+  }
+  if (s.n) chips.push([`${s.n} hari tercatat`, 'good']);
+  if (s.avgP && s.avgP < st.targetProtein * 0.8) chips.push(['Protein kurang', '']);
+  const recapTitle = week ? (H.anchor === t ? 'Recap 7 hari terakhir' : `Recap ${P.label}`) : `Recap ${P.label}`;
 
-  // detail hari terpilih
+  // --- grafik
+  const vals = P.days.map((ds) => (ds <= t ? map.get(ds)?.kcal || 0 : null));
+  const maxV = Math.max(T * 1.2, ...vals.filter((v) => v));
+  const PX = 150, BASE = 22;
+  const canNext = week ? H.anchor < t : toISO(new Date(parseISO(H.anchor).getFullYear(), parseISO(H.anchor).getMonth() + 1, 1)) <= t;
+  const bars = P.days.map((ds, i) => {
+    const v = vals[i];
+    const dd = parseISO(ds);
+    const future = v === null;
+    const cls = future ? 'future' : ds === t ? 'today' : !v ? 'none' : v > T ? 'over' : '';
+    const lbl = week ? `${DAY3[dd.getDay()]} ${dd.getDate()}` : (dd.getDate() === 1 || dd.getDate() % 5 === 0 ? String(dd.getDate()) : '');
+    return `<button class="bar-col" ${future ? 'disabled' : `data-act="hist-sel" data-date="${ds}"`} aria-pressed="${ds === H.sel}" aria-label="${midDate(ds)}${v ? ': ' + fmt0(v) + ' kkal' : ''}" style="--k:${i}">
+      <span class="val">${week && v ? fmt0(v) : ''}</span>
+      <span class="b ${cls}" style="height:${future ? 4 : Math.max(5, (v / maxV) * PX)}px"></span>
+      <span class="lbl">${lbl}</span>
+    </button>`;
+  }).join('');
+
+  // --- harian
   const sel = H.sel;
   let selDay = null;
   if (inWindow(sel)) { try { selDay = await loadDay(sel); } catch { selDay = null; } }
-  const selK = selDay ? selDay.totals.kcal : k(sel);
-  const [sc, stext] = sel === t ? ['', 'Hari ini · masih berjalan'] : statusOf(selK, T);
+  const selK = selDay ? selDay.totals.kcal : map.get(sel)?.kcal || 0;
+  const [sc, stext] = sel === t ? ['', 'Hari ini'] : statusOf(selK, T);
+  const selMacro = selDay ? selDay.totals : map.get(sel);
 
   return `
-  <header class="page-head"><h1>Riwayat</h1>${info('Total kalori harian tersimpan sampai 1 tahun. Rincian makanan hanya disimpan 7 hari terakhir, lalu terhapus otomatis. Pakai “Loncat ke tanggal” untuk membuka hari tertentu.', 'riwayat', 'left')}</header>
-  <div class="hist-tools">
-    <div class="seg" role="tablist" aria-label="Rentang">
-      ${['minggu', 'bulan', 'tahun'].map((x) => `<button role="tab" data-act="hist-tab" data-tab="${x}" aria-selected="${H.tab === x}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}
+  <header class="page-head"><h1>Riwayat</h1>${info('Total kalori harian disimpan sampai 1 tahun. Rincian makanan hanya disimpan 7 hari terakhir, lalu terhapus otomatis.', 'riwayat')}</header>
+
+  <section class="card-dark recap" aria-label="Recap">
+    <span class="eyebrow light" style="position:relative">${esc(recapTitle)}</span>
+    <p>${esc(recap)}</p>
+    ${chips.length ? `<div class="chips">${chips.map(([c, cls]) => `<span class="${cls}">${esc(c)}</span>`).join('')}</div>` : ''}
+  </section>
+
+  <div class="seg full" role="tablist" aria-label="Periode">
+    <button role="tab" data-act="hist-tab" data-tab="minggu" aria-selected="${week}">Minggu</button>
+    <button role="tab" data-act="hist-tab" data-tab="bulan" aria-selected="${!week}">Bulan</button>
+  </div>
+
+  <section class="card stack" aria-label="Grafik kalori">
+    <div class="row-between">
+      <div class="stack" style="gap:0"><span class="small muted">Konsumsi kalori</span><h2>${esc(P.label)}</h2></div>
+      <div class="row" style="gap:6px">
+        <button class="icon-btn" data-act="${week ? 'hist-shift' : 'hist-month'}" data-n="${week ? -7 : -1}" aria-label="Periode sebelumnya">${icon('left', 18)}</button>
+        <button class="icon-btn" data-act="${week ? 'hist-shift' : 'hist-month'}" data-n="${week ? 7 : 1}" aria-label="Periode berikutnya" ${canNext ? '' : 'disabled style="opacity:.4"'}>${icon('right', 18)}</button>
+      </div>
     </div>
-    <div class="jump"><label for="jump">${icon('calendar', 18)}<span class="sr-only">Loncat ke tanggal</span></label><span class="small" style="font-weight:700">Loncat ke</span><input id="jump" type="date" data-on="hist-jump" value="${sel}" min="${addDays(t, -365)}" max="${t}"></div>
+    <div class="bars ${week ? '' : 'month'}" style="height:${PX + 58}px;grid-template-columns:repeat(${P.days.length}, minmax(0, 1fr))" role="group" aria-label="Kalori per hari, rata-rata ${fmt0(s.avg)} kkal">
+      <div class="target" style="bottom:${BASE + (T / maxV) * PX}px"></div>
+      ${s.n ? `<div class="avg" style="bottom:${BASE + (s.avg / maxV) * PX}px"></div>` : ''}
+      ${bars}
+    </div>
+    <div class="legend">
+      ${s.n ? `<span><i style="height:0;border-top:2px solid var(--protein);border-radius:0"></i>Rata-rata ${fmt0(s.avg)}</span>` : ''}
+      <span><i style="height:0;border-top:2px dashed var(--grey);border-radius:0"></i>Target ${fmt0(T)}</span>
+      <span><i style="background:var(--ember)"></i>Lewat target</span>
+    </div>
+  </section>
+
+  <div class="stats3">
+    <div class="card stat"><span class="small muted">Rata-rata</span><div class="v">${s.n ? fmt0(s.avg) : '—'}</div><span class="small muted">kkal/hari</span></div>
+    <div class="card stat"><span class="small muted">Sesuai target</span><div class="v">${s.ok}</div><span class="small muted">dari ${s.n} hari</span></div>
+    <div class="card stat"><span class="small muted">Tertinggi</span><div class="v" style="color:var(--ember-text)">${s.top ? fmt0(s.topK) : '—'}</div><span class="small muted">${s.top ? shortDate(s.top) : ''}</span></div>
   </div>
-  <div class="stats">
-    <div class="card stat"><span class="small muted">Rata-rata · ${esc(label)}</span><div class="v">${fmt0(avg)} <small>kkal</small></div></div>
-    <div class="card stat"><span class="small muted">Hari sesuai target</span><div class="v">${okDays} <small>dari ${logged.length}</small></div></div>
-    <div class="card stat"><span class="small muted">Tertinggi</span><div class="v" style="color:var(--ember-text)">${top ? fmt0(k(top)) : '—'} <small>kkal</small></div><span class="small muted">${top ? shortDate(top) : ''}</span></div>
-    <div class="card stat"><span class="small muted">Rutin mencatat</span><div class="v">${streak} <small>hari berturut</small></div></div>
-  </div>
-  <div class="hist-grid">
-    <section class="card stack" aria-label="Grafik">${H.tab === 'minggu' ? weekChart(map, T) : H.tab === 'bulan' ? monthChart(map, T) : yearChart(map, T)}</section>
-    <section class="card stack" aria-label="Detail hari terpilih">
-      <div class="stack" style="gap:2px"><span class="eyebrow">Hari terpilih</span><h2 style="font-size:18px">${longDate(sel)}</h2></div>
-      <div class="row-between" style="background:var(--soft-2);border-radius:16px;padding:14px">
-        <span style="font-size:28px;font-weight:800;letter-spacing:-.03em" class="num"><span data-count="${Math.round(selK)}">0</span> <span class="small muted" style="font-weight:600">kkal</span></span>
+
+  <section class="stack" aria-label="Harian" style="margin-top:6px">
+    <h2 style="font-size:18px">Harian</h2>
+    <label class="jump wide">${icon('calendar', 20)}<span class="lbl">Loncat ke tanggal</span><input type="date" data-on="hist-jump" value="${sel}" min="${addDays(t, -365)}" max="${t}"></label>
+    <div class="card day-card">
+      <div class="day-top">
+        <div class="stack" style="gap:2px"><span class="small muted" style="font-weight:600">${longDate(sel)}</span><span style="font-size:26px;font-weight:800;letter-spacing:-.03em" class="num"><span data-count="${Math.round(selK)}">0</span> <span class="small muted" style="font-weight:600">kkal</span></span>
+          ${selMacro && selK ? `<span class="small muted">Karbo ${fmt0(selMacro.carb)} g · Protein ${fmt0(selMacro.protein)} g · Lemak ${fmt0(selMacro.fat)} g</span>` : ''}</div>
         <span class="badge ${sc}">${stext}</span>
       </div>
-      ${selDay && selDay.foods.length ? `<div class="stack" style="gap:0">${selDay.foods.map((f) => `<a href="#/edit?id=${encodeURIComponent(f.id)}" data-act="edit-from-hist" data-date="${sel}" class="row" style="min-height:48px;border-bottom:1px solid var(--line-2);color:var(--ink);text-decoration:none"><span class="small muted" style="width:44px">${esc(f.time)}</span><span class="grow" style="font-weight:700">${esc(f.name)}${f.portion !== 1 ? ` <span class="badge">×${fmtQ(f.portion)}</span>` : ''}</span><b class="num">${fmt0(f.kcal * f.portion)}</b></a>`).join('')}</div>`
-        : selK && !inWindow(sel) ? `<div class="notice">${icon('clock', 18)}<span>Rincian makanan tanggal ini sudah dihapus otomatis. Total kalorinya tetap tersimpan.</span></div>`
-        : `<span class="muted small">Belum ada catatan di tanggal ini.</span>`}
-      ${inWindow(sel) ? `<button class="btn btn-soft" data-act="open-day" data-date="${sel}">Buka di Hari ini ${icon('right', 18)}</button>` : ''}
-    </section>
-  </div>`;
+      ${selDay && selDay.foods.length
+        ? `<div class="day-foods">${selDay.foods.map((f) => `<a href="#/edit?id=${encodeURIComponent(f.id)}" data-act="edit-from-hist" data-date="${sel}"><span class="small muted" style="width:44px">${esc(f.time)}</span><span class="grow" style="font-weight:700">${esc(f.name)}${f.portion !== 1 ? ` <span class="badge">×${fmtQ(f.portion)}</span>` : ''}</span><b class="num">${fmt0(f.kcal * f.portion)}</b></a>`).join('')}</div>`
+        : `<div class="notice" style="border-radius:0;background:transparent">${icon('clock', 18)}<span>${selK && !inWindow(sel) ? 'Rincian makanan tanggal ini sudah dihapus otomatis (lebih dari 7 hari). Total kalorinya tetap tersimpan.' : 'Belum ada catatan di tanggal ini.'}</span></div>`}
+    </div>
+  </section>`;
 }
 
-function weekChart(map, T) {
-  const H = S.hist;
-  const t = today();
-  const days = Array.from({ length: 7 }, (_, i) => addDays(H.anchor, i - 6));
-  const vals = days.map((ds) => map.get(ds)?.kcal || 0);
-  const maxV = Math.max(T * 1.25, ...vals);
-  const PX = 140;
-  const canNext = H.anchor < t;
-  return `<div class="row-between">
-      <h2>${shortDate(days[0])} – ${shortDate(days[6])}</h2>
-      <div class="row" style="gap:6px"><button class="icon-btn" data-act="hist-shift" data-n="-7" aria-label="Minggu sebelumnya">${icon('left', 18)}</button><button class="icon-btn" data-act="hist-shift" data-n="7" aria-label="Minggu berikutnya" ${canNext ? '' : 'disabled style="opacity:.4"'}>${icon('right', 18)}</button></div>
-    </div>
-    <div class="bars" style="height:${PX + 60}px" role="group" aria-label="Kalori per hari">
-      <div class="target" style="bottom:${22 + (T / maxV) * PX}px"></div>
-      ${days.map((ds, i) => {
-        const v = vals[i];
-        const cls = ds === t ? 'today' : !v ? 'none' : v > T ? 'over' : '';
-        const dd = parseISO(ds);
-        return `<button class="bar-col" data-act="hist-sel" data-date="${ds}" aria-pressed="${ds === H.sel}" aria-label="${midDate(ds)}: ${v ? fmt0(v) + ' kkal' : 'tidak tercatat'}" style="--k:${i}">
-          <span class="val">${v ? fmt0(v) : ''}</span>
-          <span class="b ${cls}" style="height:${Math.max(6, (v / maxV) * PX)}px"></span>
-          <span class="lbl">${DAY3[dd.getDay()]} ${dd.getDate()}</span>
-        </button>`;
-      }).join('')}
-    </div>
-    <div class="legend"><span><i style="background:var(--ink)"></i>Sesuai target</span><span><i style="background:var(--ember)"></i>Lewat target</span><span><i style="border:2px dashed var(--ember)"></i>Hari ini</span><span><i style="height:0;border-top:2px dashed #C9CCC3;border-radius:0"></i>Target ${fmt0(T)} kkal</span></div>`;
-}
-
-function monthChart(map, T) {
-  const H = S.hist;
-  const t = today();
-  const a = parseISO(H.anchor);
-  const y = a.getFullYear(), m = a.getMonth();
-  const first = new Date(y, m, 1);
-  const n = new Date(y, m + 1, 0).getDate();
-  const blanks = (first.getDay() + 6) % 7;
-  const canNext = toISO(new Date(y, m + 1, 1)) <= t;
-  const canPrev = toISO(new Date(y, m, 0)) >= addDays(t, -365);
-  let cells = Array.from({ length: blanks }, () => '<div class="cal-blank"></div>').join('');
-  for (let d = 1; d <= n; d++) {
-    const ds = toISO(new Date(y, m, d));
-    const v = map.get(ds)?.kcal || 0;
-    const future = ds > t;
-    const cls = [future ? 'future' : !v && ds !== t ? 'none' : '', v > T && ds !== t ? 'over' : '', ds === t ? 'today' : ''].join(' ');
-    cells += `<button class="cal-cell ${cls}" style="--k:${d}" ${future ? 'disabled' : `data-act="hist-sel" data-date="${ds}"`} aria-pressed="${ds === H.sel}" aria-label="${d} ${MON[m]}${v ? ', ' + fmt0(v) + ' kkal' : ''}">
-      <span class="d">${d}${inWindow(ds) && v ? '<i></i>' : ''}</span><span class="k">${v ? fmt0(v) : ''}</span></button>`;
-  }
-  return `<div class="row-between">
-      <h2>${MON[m]} ${y}</h2>
-      <div class="row" style="gap:6px"><button class="icon-btn" data-act="hist-month" data-n="-1" aria-label="Bulan sebelumnya" ${canPrev ? '' : 'disabled style="opacity:.4"'}>${icon('left', 18)}</button><button class="icon-btn" data-act="hist-month" data-n="1" aria-label="Bulan berikutnya" ${canNext ? '' : 'disabled style="opacity:.4"'}>${icon('right', 18)}</button></div>
-    </div>
-    <div class="cal-head"><span>Sen</span><span>Sel</span><span>Rab</span><span>Kam</span><span>Jum</span><span>Sab</span><span>Min</span></div>
-    <div class="cal">${cells}</div>
-    <div class="legend"><span><i style="background:#fff;border:1px solid #C9CCC3"></i>Sesuai</span><span><i style="background:var(--ember-soft);border:1px solid #FFD2BF"></i>Lewat target</span><span><i style="background:var(--mint);width:7px;height:7px;border-radius:9px"></i>Rincian masih ada</span></div>`;
-}
-
-function yearChart(map, T) {
-  const H = S.hist;
-  const t = today();
-  const lastMon = addDays(t, -dowMon(t));
-  const firstMon = addDays(lastMon, -52 * 7);
-  const limit = addDays(t, -364);
-  let cols = '';
-  for (let w = 0; w < 53; w++) {
-    let cells = '';
-    for (let r = 0; r < 7; r++) {
-      const ds = addDays(firstMon, w * 7 + r);
-      if (ds > t || ds < limit) { cells += '<span class="c c-void"></span>'; continue; }
-      const v = map.get(ds)?.kcal || 0;
-      const cls = ds === t ? 'c-today' : !v ? 'c-none' : v > T ? 'c-over' : v < 1500 ? 'c-low' : 'c-ok';
-      cells += `<button class="c ${cls}" style="--k:${w}" data-act="hist-sel" data-date="${ds}" aria-pressed="${ds === H.sel}" aria-label="${midDate(ds)}${v ? ': ' + fmt0(v) + ' kkal' : ''}" title="${shortDate(ds)}${v ? ' · ' + fmt0(v) + ' kkal' : ''}"></button>`;
-    }
-    cols += `<div class="wk">${cells}</div>`;
-  }
-  return `<div class="row-between"><h2>Setahun terakhir</h2>${info('Tiap kotak = 1 hari (baris: Senin–Minggu). Warnanya menunjukkan apakah kalori hari itu sesuai, lewat, atau jauh di bawah target. Ketuk kotak untuk melihat detail.', 'peta setahun')}</div>
-    <div class="heat-wrap" id="heat"><div class="heat" role="group" aria-label="Kalori harian setahun">${cols}</div></div>
-    <div class="legend"><span><i class="c-ok"></i>Sesuai</span><span><i class="c-over"></i>Lewat target</span><span><i class="c-low"></i>Di bawah 1.500</span><span><i class="c-none"></i>Tidak tercatat</span></div>`;
+function statusOf(k, T) {
+  if (!k) return ['', 'Tidak tercatat'];
+  if (k > T) return ['ember', `Lewat target +${fmt0(k - T)}`];
+  return ['mint', 'Sesuai target'];
 }
 
 /* =============================================================
@@ -874,7 +892,10 @@ function yearChart(map, T) {
 async function viewKilas(params) {
   const date = params.get('date') || S.date;
   let r = S.kilas.get(date);
-  if (!r) { r = await call('getKilas', { date }); S.kilas.set(date, r); }
+  if (!r) {
+    r = await swr('kilas:' + date, () => call('getKilas', { date }, { timeout: 90000 }), (v) => { S.kilas.set(date, v); refreshIf(['kilas']); });
+    S.kilas.set(date, r);
+  }
   const st = r.settings;
   const T = r.totals;
   const isToday = date === today();
@@ -931,120 +952,110 @@ async function viewKilas(params) {
 /* =============================================================
  *  VIEW: PENGINGAT
  * ============================================================= */
-const DAYS_LBL = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'];
+const REPEATS = [[0, 'Tidak'], [30, '30 mnt'], [60, '1 jam'], [120, '2 jam']];
+const repeatText = (m) => (m > 0 ? `Ulang tiap ${repeatShort(m)} jika diabaikan` : 'Sekali, tidak diulang');
+const isWide = () => window.matchMedia('(min-width: 1100px)').matches;
 
 async function viewPengingat() {
-  const r = await loadReminders(true);
-  const habits = r.reminders.filter((x) => x.type === 'kebiasaan');
-  const meals = r.reminders.filter((x) => x.type === 'makan');
-  const firstHabit = habits.find((h) => h.enabled) || habits[0];
-  const view = firstHabit ? r.today.find((v) => v.rid === firstHabit.id) : null;
+  const r = await loadReminders();
+  const list = [...r.reminders].sort((a, b) => a.time.localeCompare(b.time));
+  if (!S.remSel || (S.remSel !== 'new' && !list.some((x) => x.id === S.remSel))) S.remSel = list[0]?.id || 'new';
+  const active = list.filter((x) => x.enabled).length;
+  const ps = push.pushState();
+  const dot = ps === 'on' ? 'var(--mint)' : ps === 'off' ? 'var(--grey)' : 'var(--ember)';
   return `
-  <header class="page-head"><h1>Pengingat</h1>${info('Notifikasi dikirim ke semua HP &amp; laptop yang sudah diaktifkan. Kalau pengingat kebiasaan diabaikan, notifikasi diulang sesuai interval sampai kamu tekan “Sudah” atau menundanya.', 'pengingat', 'left')}
-    <button class="btn btn-sm btn-ink" data-act="habit-new">${icon('plus', 16, 2.6)}Kebiasaan</button></header>
-  ${pushCard(r)}
-  <div class="rem-grid">
-    <div class="col">
-      ${habits.map((h) => habitSettings(h, r)).join('')}
-      <section class="card" aria-label="Pengingat catat makan">
-        <div class="row-between" style="margin-bottom:4px"><h2>Pengingat catat makan</h2>${info('Notifikasi hanya muncul kalau belum ada catatan makan di sekitar jam tersebut.', 'catat makan')}</div>
-        ${meals.map((m) => `<div class="meal-row" data-rid="${esc(m.id)}">
-          <input type="time" value="${m.time}" data-on="rem-time" aria-label="Jam ${esc(m.title)}">
-          <div class="grow"><b style="font-size:14px">${esc(m.title)}</b><div class="small muted">${statusText(r.today.find((v) => v.rid === m.id), m)}</div></div>
-          <button class="switch" data-act="rem-toggle" aria-pressed="${m.enabled}" aria-label="Aktifkan ${esc(m.title)}"></button>
-        </div>`).join('')}
-      </section>
-    </div>
-    <div class="col">
-      ${firstHabit ? `<section class="card card-dark stack" aria-label="Status hari ini">
-        <div class="row-between"><h2>Hari ini · ${esc(firstHabit.title)}</h2><span class="badge dark">${view ? ({ done: 'selesai', snoozed: 'ditunda', pending: 'menunggu', nanti: 'nanti' }[view.status] || view.status) : 'libur'}</span></div>
-        ${timeline(firstHabit, view)}
-        <a class="btn btn-white" href="#/konfirmasi?rid=${encodeURIComponent(firstHabit.id)}">Buka konfirmasi</a>
-      </section>
-      <section class="card stack" aria-label="14 hari terakhir">
-        <div class="row-between"><h2>14 hari terakhir</h2><span style="font-weight:800" class="num">Streak ${r.streaks[firstHabit.id] || 0} hari</span></div>
-        <div class="dots14">${(r.last14[firstHabit.id] || []).map((x, i) => `<span class="${x === 1 ? 'on' : x === null ? 'today' : ''}" style="--k:${i}"></span>`).join('')}</div>
-        <div class="legend"><span><i style="background:var(--mint)"></i>Sudah</span><span><i style="background:var(--grey-2)"></i>Terlewat</span></div>
-      </section>` : ''}
-    </div>
+  <header class="page-head">
+    <h1>Pengingat</h1>
+    <button class="icon-btn" data-act="bell" aria-label="Pengaturan notifikasi">${icon('bell', 21)}<i class="dot-badge" style="background:${dot}"></i></button>
+    <button class="icon-btn ink" data-act="rem-new" aria-label="Tambah pengingat">${icon('plus', 20, 2.6)}</button>
+  </header>
+  <div class="row-between" style="margin-top:-8px">
+    <span class="small muted" style="font-weight:600">${active} aktif · berbunyi setiap hari</span>
+    ${info('Semua pengingat berbunyi setiap hari. Kalau diabaikan, notifikasi diulang sesuai pengaturan sampai kamu tekan “Sudah”. Pengingat catat makan otomatis dilewati kalau kamu sudah mencatat makanan di sekitar jam itu.', 'pengingat')}
+  </div>
+  ${ps !== 'on' ? `<button class="notice notice-btn" data-act="bell">${icon('bell', 18)}<span>Notifikasi belum aktif di perangkat ini. Ketuk untuk mengatur.</span>${icon('right', 16)}</button>` : ''}
+  ${r.quiet?.now ? `<div class="notice">${icon('clock', 18)}<span>Sekarang jam tenang (${esc(r.quiet.after)}–${esc(r.quiet.before)}): pengingat ditahan dulu.</span></div>` : ''}
+  <div class="rem-layout">
+    <section class="card rem-list" aria-label="Daftar pengingat">
+      ${list.map(remRow).join('') || `<div class="empty" style="border:0">Belum ada pengingat.<button class="btn btn-ink btn-sm" data-act="rem-new">${icon('plus', 16, 2.6)}Tambah pengingat</button></div>`}
+    </section>
+    <section class="card rem-panel" aria-label="Ubah pengingat">${remForm(S.remSel)}</section>
   </div>`;
 }
 
-function statusText(v, m) {
-  if (!m.enabled) return 'Nonaktif';
-  if (!v) return 'Tidak aktif hari ini';
-  if (v.status === 'done') return m.type === 'makan' ? 'Sudah ada catatan ✓' : `Selesai ${v.doneAt}`;
-  if (v.status === 'sent') return 'Notifikasi terkirim';
-  if (v.status === 'nanti') return `Berikutnya ${v.time}`;
-  return habitStatusText(v);
+function remRow(x) {
+  const meal = x.type === 'makan';
+  return `<div class="rem-row ${x.enabled ? '' : 'off'} ${S.remSel === x.id ? 'sel' : ''}" data-rid="${esc(x.id)}">
+    <span class="rem-ic ${meal ? 'meal' : 'pill'}">${icon(meal ? 'meal' : 'pill', 20)}</span>
+    <div class="grow" style="min-width:0">
+      <b class="rem-time num">${esc(x.time)}</b>
+      <div class="rem-name">${esc(x.title)}</div>
+      <span class="small muted">${Number(x.repeatMin) > 0 ? `Ulang tiap ${repeatShort(Number(x.repeatMin))}` : 'Tidak diulang'}</span>
+    </div>
+    <button class="icon-btn soft" data-act="rem-edit" aria-label="Ubah ${esc(x.title)}">${icon('pencil', 17)}</button>
+    <button class="switch" data-act="rem-toggle" aria-pressed="${x.enabled}" aria-label="Aktifkan ${esc(x.title)}"></button>
+  </div>`;
 }
 
-function habitSettings(h, r) {
-  const v = r.today.find((x) => x.rid === h.id);
-  return `<section class="card rem-card ${h.enabled ? '' : 'off'}" data-rid="${esc(h.id)}" aria-label="${esc(h.title)}">
-    <div class="row">
-      <div class="ic">${icon('pill', 24)}</div>
-      <div class="grow"><input class="item-name" style="font-size:16px" value="${esc(h.title)}" data-on="rem-title" aria-label="Nama kebiasaan"><div class="small muted">${statusText(v, h)}</div></div>
-      <button class="switch" data-act="rem-toggle" aria-pressed="${h.enabled}" aria-label="Aktifkan ${esc(h.title)}"></button>
+function remForm(id) {
+  const isNew = id === 'new';
+  const x = isNew
+    ? { id: '', title: '', time: '20:00', repeatMin: 60, type: 'kebiasaan', enabled: true }
+    : S.rem?.reminders.find((r) => r.id === id);
+  if (!x) return '';
+  const rep = Number(x.repeatMin) || 0;
+  return `<form class="stack" data-form="rem" style="gap:14px">
+    <h2 style="font-size:19px">${isNew ? 'Pengingat baru' : 'Ubah pengingat'}</h2>
+    <label class="field"><span>Nama</span><input name="title" class="input" required maxlength="60" value="${esc(x.title)}" placeholder="mis. Minum air 2 gelas"></label>
+    <label class="field"><span>Jam</span><input name="time" type="time" class="input big" required value="${esc(x.time)}"></label>
+    <div class="field"><span>Ulangi jika diabaikan</span>
+      <div class="opts" role="group" aria-label="Ulangi jika diabaikan">${REPEATS.map(([v, l]) => `<button type="button" data-act="rep-pick" data-v="${v}" aria-pressed="${rep === v}">${l}</button>`).join('')}</div>
+      <input type="hidden" name="repeat" value="${rep}">
     </div>
-    <div class="row" style="align-items:flex-end;flex-wrap:wrap">
-      <label class="field grow" style="min-width:160px"><span>Jam notifikasi</span><input type="time" class="input big" value="${h.time}" data-on="rem-time"></label>
-      <label class="field grow" style="min-width:150px"><span>Ulangi jika diabaikan</span>
-        <select data-on="rem-repeat">${[[120, 'Tiap 2 jam'], [60, 'Tiap 1 jam'], [30, 'Tiap 30 menit'], [180, 'Tiap 3 jam'], [0, 'Jangan ulangi']].map(([val, l]) => `<option value="${val}" ${Number(h.repeatMin) === val ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-    </div>
-    <div class="stack" style="gap:6px"><span class="label">Hari aktif</span>
-      <div class="days" role="group" aria-label="Hari aktif">${DAYS_LBL.map((l, i) => `<button data-act="rem-day" data-i="${i}" aria-pressed="${h.days[i] === '1'}">${l}</button>`).join('')}</div>
-    </div>
-    ${h.id !== 'vitamin' ? `<button class="btn btn-sm btn-ghost" data-act="habit-delete" style="align-self:flex-start">${icon('trash', 16)}Hapus kebiasaan</button>` : ''}
-  </section>`;
+    <input type="hidden" name="id" value="${esc(x.id)}">
+    <input type="hidden" name="type" value="${esc(x.type)}">
+    <button class="btn btn-ink btn-lg btn-block" type="submit">${icon('check', 18, 2.6)}Simpan</button>
+    ${isNew ? '' : `<button type="button" class="btn btn-ghost danger-text" data-act="rem-delete" data-rid="${esc(x.id)}">Hapus pengingat</button>`}
+  </form>`;
 }
 
-function timeline(h, v) {
-  if (!v) return '<p class="small" style="color:var(--on-dark-muted)">Tidak dijadwalkan hari ini.</p>';
-  const items = [];
-  items.push({ t: `${h.time} · Notifikasi pertama`, s: v.status === 'nanti' ? 'Belum waktunya' : 'Terkirim', next: v.status === 'nanti' });
-  if (v.status === 'done') items.push({ t: `${v.doneAt} · Ditandai sudah`, s: 'Pengingat berhenti' });
-  else if (v.status === 'snoozed') items.push({ t: `${v.nextAt} · Setelah ditunda`, s: 'Akan diingatkan lagi', next: true });
-  else if (v.status === 'pending' && h.repeatMin > 0) {
-    if (v.sentCount > 1) items.push({ t: `Pengingat ulang ke-${v.sentCount}`, s: `Tiap ${h.repeatMin >= 60 ? h.repeatMin / 60 + ' jam' : h.repeatMin + ' menit'}` });
-    items.push({ t: `${v.nextAt} · Pengingat ulang berikutnya`, s: 'Berhenti setelah kamu tekan “Sudah”', next: true });
-  }
-  return `<ol class="timeline">${items.map((x, i) => `<li><div class="rail"><i class="${x.next ? 'next' : ''}"></i>${i < items.length - 1 ? '<s></s>' : ''}</div><div class="txt"><div style="font-weight:700;font-size:14px;${x.next ? 'color:var(--ember-light)' : ''}">${esc(x.t)}</div><div class="small" style="color:var(--on-dark-muted)">${esc(x.s)}</div></div></li>`).join('')}</ol>`;
-}
-
-function pushCard(r) {
-  const state = push.pushState();
+function bellSheet() {
+  const r = S.rem || {};
+  const ps = push.pushState();
   const live = !conn.demo;
   const needFb = live && !push.firebaseReady();
-  const msg = {
-    on: ['mint', 'Notifikasi aktif di perangkat ini'],
-    off: ['', 'Notifikasi belum aktif di perangkat ini'],
-    denied: ['ember', 'Izin notifikasi diblokir'],
-    'ios-install': ['ember', 'iPhone: pasang ke layar utama dulu'],
-    unsupported: ['ember', 'Browser ini belum mendukung notifikasi'],
-  }[state];
+  const status = {
+    on: ['var(--mint-soft)', 'var(--mint-text)', 'check', 'Aktif di perangkat ini'],
+    off: ['var(--soft)', 'var(--ink)', 'bell', 'Belum aktif di perangkat ini'],
+    denied: ['var(--ember-soft)', 'var(--ember-text)', 'alert', 'Izin notifikasi diblokir'],
+    'ios-install': ['var(--ember-soft)', 'var(--ember-text)', 'phone', 'iPhone: pasang ke layar utama dulu'],
+    unsupported: ['var(--ember-soft)', 'var(--ember-text)', 'alert', 'Browser ini belum mendukung notifikasi'],
+  }[ps];
   const help = {
     denied: 'Buka pengaturan situs di browser → Notifikasi → Izinkan, lalu muat ulang halaman.',
-    'ios-install': 'Buka Kalora di Safari → tombol Bagikan → “Add to Home Screen”. Setelah itu buka Kalora dari ikon di layar utama, lalu aktifkan notifikasi di sini.',
+    'ios-install': 'Buka Kalora di Safari → tombol Bagikan → “Add to Home Screen”. Setelah itu buka Kalora dari ikon di layar utama dan aktifkan di sini.',
     unsupported: 'Coba pakai Chrome, Edge, atau Safari versi terbaru.',
-  }[state];
-  return `<section class="card row" style="flex-wrap:wrap" aria-label="Status notifikasi">
-    <span class="k-ic" style="width:44px;height:44px;border-radius:14px;background:${state === 'on' ? 'var(--mint-soft);color:var(--mint-text)' : 'var(--soft);color:var(--ink)'}">${icon(state === 'on' ? 'bell' : 'phone', 22)}</span>
-    <div class="grow" style="min-width:180px"><b>${msg[1]}</b><div class="small muted">${r.devices} perangkat terdaftar${conn.demo ? ' · mode demo' : ''}</div></div>
-    ${help ? info(help, 'notifikasi') : ''}
-    <div class="row" style="gap:8px">
-      ${state === 'off' ? `<button class="btn btn-ember" data-act="push-enable" ${needFb ? 'disabled' : ''}>${icon('bell', 18)}Aktifkan</button>` : ''}
-      ${state === 'on' ? `<button class="btn btn-soft" data-act="push-test">${icon('send', 18)}Kirim uji</button>` : ''}
+  }[ps];
+  openSheet(`<div class="row-between"><h2 style="font-size:20px">Notifikasi</h2><button class="icon-btn soft" data-sheet-close aria-label="Tutup">${icon('x', 18)}</button></div>
+    <div class="row" style="background:${status[0]};border-radius:18px;padding:14px">
+      <span class="k-ic" style="width:42px;height:42px;border-radius:14px;background:#fff;color:${status[1]}">${icon(status[2], 20, 2.4)}</span>
+      <div class="grow"><b>${status[3]}</b><div class="small muted">${esc(push.deviceLabel())}</div></div>
     </div>
-    ${needFb ? `<div class="notice" style="width:100%">${icon('alert', 18)}<span>Firebase belum diatur. Isi <b>FIREBASE</b> &amp; <b>VAPID_KEY</b> di <code>js/config.js</code>, lalu upload ulang ke GitHub.</span></div>` : ''}
-  </section>`;
+    ${help ? `<p class="small muted" style="margin:0">${help}</p>` : ''}
+    ${needFb ? `<div class="notice">${icon('alert', 18)}<span>Firebase belum diatur. Isi <b>FIREBASE</b> &amp; <b>VAPID_KEY</b> di <code>js/config.js</code>, lalu upload ulang ke GitHub.</span></div>` : ''}
+    <div>
+      <div class="row-between" style="min-height:44px;border-bottom:1px solid var(--line-2)"><span>Perangkat terdaftar</span><b>${r.devices ?? '—'}</b></div>
+      <div class="row-between" style="min-height:44px"><span>Jam tenang</span><a href="#/pengaturan" style="font-weight:800;text-decoration:none">${esc(r.quiet?.after || S.settings?.quietAfter || '22:30')} – ${esc(r.quiet?.before || S.settings?.quietBefore || '07:00')}</a></div>
+    </div>
+    ${ps === 'off' ? `<button class="btn btn-ember btn-lg btn-block" data-act="push-enable" ${needFb ? 'disabled' : ''}>${icon('bell', 18)}Aktifkan di perangkat ini</button>` : ''}
+    ${ps === 'on' ? `<button class="btn btn-soft btn-lg btn-block" data-act="push-test">${icon('send', 18)}Kirim notifikasi uji</button>` : ''}`);
 }
 
 /* =============================================================
  *  VIEW: KONFIRMASI KEBIASAAN
  * ============================================================= */
 async function viewKonfirmasi(params) {
-  const r = await loadReminders(true);
+  const r = await loadReminders();
   const habits = r.reminders.filter((x) => x.type === 'kebiasaan');
   const rid = params.get('rid') || habits.find((h) => h.enabled)?.id || habits[0]?.id;
   const h = r.reminders.find((x) => x.id === rid);
@@ -1090,14 +1101,24 @@ async function viewKonfirmasi(params) {
 async function remAction(rid, what, until, date = today(), celebrate = false) {
   try {
     const r = await call('reminderAction', { rid, date, do: what, until });
-    S.rem = null;
-    S.days.delete(today());
+    forgetReminders();
     const v = r.view;
     toast(what === 'done' ? 'Tercatat ✓' : what === 'snooze' ? `Ditunda sampai ${v.nextAt}` : 'Dibatalkan');
     await rerender();
     if ((what === 'done' || celebrate) && $('#confirm-badge')) burst($('#confirm-badge'));
     return v;
   } catch (e) { toast(e.message, 'err'); return null; }
+}
+
+function pushResultSheet(r) {
+  const rows = (r.results || []).map((x) => `<div class="row" style="align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line-2)">
+    <span class="k-ic" style="background:${x.ok ? 'var(--mint-soft);color:var(--mint-text)' : '#FDECEC;color:#B42318'}">${icon(x.ok ? 'check' : 'alert', 14, 3)}</span>
+    <div class="grow"><b>${esc(x.label)}</b><div class="small muted">${x.ok ? 'Terkirim ke FCM' : esc(x.error || 'Gagal')}</div></div></div>`).join('');
+  openSheet(`<h2 style="font-size:20px">Hasil kirim uji</h2>
+    <p class="muted small">${r.sent || 0} dari ${r.total || 0} perangkat berhasil.</p>
+    <div>${rows || '<p class="muted">Belum ada perangkat terdaftar.</p>'}</div>
+    <div class="notice">${icon('info', 18)}<span>Kalau terkirim tapi tidak muncul: cek izin notifikasi browser/HP, mode Fokus/Jangan Ganggu, dan di iPhone pastikan Kalora dibuka dari ikon layar utama.</span></div>
+    <button class="btn btn-ink btn-block" data-sheet-close>Tutup</button>`);
 }
 
 function snoozeSheet(rid, date = today()) {
@@ -1107,18 +1128,6 @@ function snoozeSheet(rid, date = today()) {
       <label class="field grow"><span>Atau pilih jam</span><input type="time" class="input big" id="snooze-time" value="${addMinHM(120)}"></label>
       <button class="btn btn-ember" style="height:54px" data-act="snooze-custom" data-rid="${esc(rid)}" data-date="${date}">Tunda</button>
     </div>`);
-}
-
-function habitSheet() {
-  openSheet(`<form class="stack" data-form="habit-new" style="gap:14px">
-    <h2 style="font-size:20px">Kebiasaan baru</h2>
-    <label class="field"><span>Nama kebiasaan</span><input name="title" required maxlength="60" placeholder="mis. Minum air 2 gelas" class="input"></label>
-    <div class="row" style="align-items:flex-end">
-      <label class="field grow"><span>Jam</span><input name="time" type="time" value="20:00" required class="input"></label>
-      <label class="field grow"><span>Ulangi jika diabaikan</span><select name="repeat" class="input"><option value="120">Tiap 2 jam</option><option value="60">Tiap 1 jam</option><option value="30">Tiap 30 menit</option><option value="0">Jangan ulangi</option></select></label>
-    </div>
-    <button class="btn btn-ink btn-lg btn-block" type="submit">${icon('plus', 18, 2.6)}Simpan kebiasaan</button>
-  </form>`);
 }
 
 /* =============================================================
@@ -1181,8 +1190,6 @@ const ACT = {
     if (!(await confirmSheet('Reset data demo?', 'Semua data contoh akan dibuat ulang.', 'Reset', true))) return;
     resetDemo(); S.days.clear(); S.history = null; S.rem = null; S.kilas.clear(); toast('Data demo dibuat ulang'); go('#/');
   },
-  'pick-day': (el) => { S.date = el.dataset.date; rerender(); },
-  'go-today': () => { S.date = today(); rerender(); },
   'open-day': (el) => { S.date = el.dataset.date; go('#/'); },
   'edit-from-hist': (el) => { S.date = el.dataset.date; location.hash = el.getAttribute('href'); },
   'add-tab': (el) => {
@@ -1237,7 +1244,7 @@ const ACT = {
       go('#/');
     } catch (e) { toast(e.message, 'err'); }
   },
-  'hist-tab': (el) => { S.hist.tab = el.dataset.tab; S.hist.anchor = S.hist.sel; render(); },
+  'hist-tab': (el) => { S.hist.tab = el.dataset.tab; S.hist.anchor = minDate(today(), S.hist.sel); render(); },
   'hist-sel': (el) => { S.hist.sel = el.dataset.date; rerender(); },
   'hist-shift': (el) => {
     const n = Number(el.dataset.n);
@@ -1262,8 +1269,9 @@ const ACT = {
     busyBtn(el, true, 'Merangkum…');
     $('#kilas-hero p.lead')?.classList.add('skel');
     try {
-      const r = await call('getKilas', { date, refresh: true });
+      const r = await call('getKilas', { date, refresh: true }, { timeout: 90000 });
       S.kilas.set(date, r);
+      if (!conn.demo) cache.set('kilas:' + date, r);
       S.days.delete(date);
       await render();
       toast('Kilas Harian diperbarui');
@@ -1285,33 +1293,42 @@ const ACT = {
     const r = S.rem.reminders.find((x) => x.id === rid);
     r.enabled = !r.enabled;
     el.setAttribute('aria-pressed', r.enabled);
-    el.closest('.rem-card')?.classList.toggle('off', !r.enabled);
+    el.closest('.rem-row')?.classList.toggle('off', !r.enabled);
     saveReminder(r, 0);
   },
-  'rem-day'(el) {
-    const rid = el.closest('[data-rid]').dataset.rid;
-    const r = S.rem.reminders.find((x) => x.id === rid);
-    const i = Number(el.dataset.i);
-    const arr = r.days.split('');
-    arr[i] = arr[i] === '1' ? '0' : '1';
-    if (!arr.includes('1')) { toast('Minimal satu hari aktif.', 'err'); return; }
-    r.days = arr.join('');
-    el.setAttribute('aria-pressed', arr[i] === '1');
-    saveReminder(r);
+  bell: () => bellSheet(),
+  'rem-new'() {
+    if (isWide()) { S.remSel = 'new'; rerender().then(() => $('.rem-panel input[name=title]')?.focus()); }
+    else openSheet(remForm('new'));
   },
-  'habit-new': () => habitSheet(),
-  async 'habit-delete'(el) {
+  'rem-edit'(el) {
     const rid = el.closest('[data-rid]').dataset.rid;
-    if (!(await confirmSheet('Hapus kebiasaan ini?', 'Pengingat dan riwayatnya tidak ditampilkan lagi.', 'Hapus', true))) return;
-    try { await call('deleteReminder', { id: rid }); S.rem = null; toast('Kebiasaan dihapus'); render(); } catch (e) { toast(e.message, 'err'); }
+    if (isWide()) { S.remSel = rid; rerender(); }
+    else openSheet(remForm(rid));
+  },
+  'rep-pick'(el) {
+    const f = el.closest('form');
+    $$('[data-act="rep-pick"]', f).forEach((b) => b.setAttribute('aria-pressed', b === el));
+    f.repeat.value = el.dataset.v;
+  },
+  async 'rem-delete'(el) {
+    const rid = el.dataset.rid;
+    const x = S.rem?.reminders.find((r) => r.id === rid);
+    if (!(await confirmSheet('Hapus pengingat ini?', `“${x?.title || ''}” tidak akan berbunyi lagi.`, 'Hapus', true))) return;
+    try { await call('deleteReminder', { id: rid }); forgetReminders(); S.remSel = null; toast('Pengingat dihapus'); render({ quiet: true }); } catch (e) { toast(e.message, 'err'); }
   },
   async 'push-enable'(el) {
     busyBtn(el, true, 'Mengaktifkan…');
-    try { await push.enablePush(); toast('Notifikasi aktif di perangkat ini'); S.rem = null; render(); } catch (e) { busyBtn(el, false); toast(e.message, 'err'); }
+    try { await push.enablePush(); closeSheet(); toast('Notifikasi aktif di perangkat ini'); forgetReminders(); render({ quiet: true }); } catch (e) { busyBtn(el, false); toast(e.message, 'err'); }
   },
   async 'push-test'(el) {
     busyBtn(el, true, 'Mengirim…');
-    try { const r = await call('testPush'); busyBtn(el, false); toast(r.sent ? `Terkirim ke ${r.sent} perangkat` : 'Belum ada perangkat yang terdaftar', r.sent ? 'ok' : 'err'); } catch (e) { busyBtn(el, false); toast(e.message, 'err'); }
+    try {
+      const r = await call('testPush');
+      busyBtn(el, false);
+      if (r.total && r.sent === r.total) { toast(`Terkirim ke ${r.sent} perangkat — cek notifikasimu`); return; }
+      pushResultSheet(r);
+    } catch (e) { busyBtn(el, false); toast(e.message, 'err'); }
   },
 };
 
@@ -1319,12 +1336,11 @@ const saveTimers = new Map();
 function saveReminder(r, delay = 700) {
   clearTimeout(saveTimers.get(r.id));
   saveTimers.set(r.id, setTimeout(async () => {
-    try { await call('saveReminder', { reminder: r }); S.days.delete(today()); toast('Pengingat disimpan'); } catch (e) { toast(e.message, 'err'); }
+    try { await call('saveReminder', { reminder: r }); cache.del('rem'); cache.del('day:' + today()); S.days.delete(today()); toast('Pengingat disimpan'); } catch (e) { toast(e.message, 'err'); }
   }, delay));
 }
 
 const ON = {
-  'pick-date': (el) => { if (el.value) { S.date = el.value; rerender(); } },
   'manual-text': (el) => { S.manualText = el.value; },
   file: (el) => { const f = el.files?.[0]; el.value = ''; handleImage(f); },
   'item-name': (el) => { S.draft.items[Number(el.closest('.item-card').dataset.idx)].name = el.value; },
@@ -1336,9 +1352,6 @@ const ON = {
   'draft-date': (el) => { S.draft.date = el.value; },
   'draft-time': (el) => { S.draft.time = el.value; },
   'hist-jump': (el) => { if (el.value) { S.hist.sel = el.value; S.hist.anchor = el.value; render(); } },
-  'rem-title': (el) => { const r = S.rem.reminders.find((x) => x.id === el.closest('[data-rid]').dataset.rid); r.title = el.value.trim() || r.title; saveReminder(r, 1200); },
-  'rem-time': (el) => { const r = S.rem.reminders.find((x) => x.id === el.closest('[data-rid]').dataset.rid); if (el.value) { r.time = el.value; saveReminder(r); } },
-  'rem-repeat': (el) => { const r = S.rem.reminders.find((x) => x.id === el.closest('[data-rid]').dataset.rid); r.repeatMin = Number(el.value); saveReminder(r, 0); },
 };
 const ON_CHANGE_ONLY = new Set(['pick-date', 'file', 'draft-date', 'draft-time', 'hist-jump', 'rem-time', 'rem-repeat']);
 
@@ -1368,19 +1381,34 @@ const FORMS = {
     const fd = Object.fromEntries(new FormData(form));
     try {
       S.settings = await call('saveSettings', { settings: { ...fd, targetKcal: parseNum(fd.targetKcal), targetProtein: parseNum(fd.targetProtein), targetCarb: parseNum(fd.targetCarb), targetFat: parseNum(fd.targetFat) } });
-      S.days.clear(); S.history = null; S.kilas.clear();
+      S.days.clear(); S.history = null; S.kilas.clear(); S.rem = null; cache.clear();
       busyBtn(btn, false);
       toast('Pengaturan disimpan');
     } catch (e) { busyBtn(btn, false); toast(e.message, 'err'); }
   },
-  async 'habit-new'(form) {
+  async rem(form) {
     const btn = $('button[type=submit]', form);
+    const fd = Object.fromEntries(new FormData(form));
+    const old = S.rem?.reminders.find((x) => x.id === fd.id);
+    const reminder = {
+      id: fd.id || undefined,
+      type: fd.type === 'makan' ? 'makan' : 'kebiasaan',
+      title: String(fd.title || '').trim(),
+      time: fd.time,
+      repeatMin: Number(fd.repeat) || 0,
+      days: '1111111',
+      enabled: old ? old.enabled : true,
+      order: old ? old.order : 50,
+    };
+    if (!reminder.title) { toast('Isi nama pengingatnya dulu.', 'err'); return; }
     busyBtn(btn, true, 'Menyimpan…');
     try {
-      await call('saveReminder', { reminder: { type: 'kebiasaan', title: form.title.value, time: form.time.value, repeatMin: Number(form.repeat.value), days: '1111111', enabled: true, order: 10 } });
-      closeSheet(); S.rem = null; S.days.delete(today());
-      toast('Kebiasaan ditambahkan');
-      render();
+      const r = await call('saveReminder', { reminder });
+      forgetReminders();
+      S.remSel = r.reminder.id;
+      closeSheet();
+      toast(old ? 'Pengingat disimpan' : 'Pengingat ditambahkan');
+      render({ quiet: true });
     } catch (e) { busyBtn(btn, false); toast(e.message, 'err'); }
   },
 };
@@ -1389,7 +1417,7 @@ function bindEvents() {
   document.addEventListener('click', (e) => {
     // tutup popover info lain
     $$('details.info[open]').forEach((d) => { if (!d.contains(e.target)) d.open = false; });
-    if (e.target.matches('[data-backdrop]')) { closeSheet(); return; }
+    if (e.target.matches('[data-backdrop]') || e.target.closest('[data-sheet-close]')) { closeSheet(); return; }
     const el = e.target.closest('[data-act]');
     if (!el || el.disabled) return;
     const fn = ACT[el.dataset.act];
@@ -1457,7 +1485,7 @@ function bindEvents() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && conn.ready) {
       if (S.date !== today() && S.date === addDays(today(), -1)) S.date = today();
-      S.days.delete(today()); S.rem = null;
+      S.days.delete(today()); S.rem = null; // cache lokal tetap dipakai untuk tampilan instan
       const p = parseHash().path;
       if (p === '' || p === 'pengingat') rerender();
     }
@@ -1472,5 +1500,6 @@ function hydrateStatic() {
 /* ---------------- mulai ---------------- */
 hydrateStatic();
 bindEvents();
+pruneCache();
 render();
-push.registerSW().then(() => push.refreshPush());
+push.registerSW().then(() => setTimeout(() => push.refreshPush(), 6000));

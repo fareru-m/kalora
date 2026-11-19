@@ -3,7 +3,7 @@
  * - menerima push dari Firebase Cloud Messaging dan menampilkan notifikasi
  * - tombol "Sudah" / "Tunda 30 mnt" langsung dicatat ke Apps Script
  */
-const VERSION = 'kalora-v1.0.0';
+const VERSION = 'kalora-v1.2.0';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './css/app.css',
@@ -25,24 +25,37 @@ self.addEventListener('activate', (event) => {
   })());
 });
 
-// Network dulu (supaya update langsung terasa), fallback ke cache saat offline.
+// Strategi cache (supaya app cepat dibuka):
+// - halaman (HTML): coba internet maks 3 detik, kalau lambat/offline pakai cache
+// - file lain (JS, CSS, ikon): langsung dari cache, lalu diperbarui diam-diam
+async function fromNetwork(req) {
+  const res = await fetch(req);
+  if (res.ok) (await caches.open(VERSION)).put(req, res.clone());
+  return res;
+}
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  if (req.mode === 'navigate') {
+    event.respondWith((async () => {
+      const net = fromNetwork(req);
+      const timeout = new Promise((r) => setTimeout(r, 3000));
+      try {
+        const res = await Promise.race([net, timeout]);
+        if (res) return res;
+      } catch { /* offline */ }
+      const hit = await caches.match('./index.html');
+      return hit || net;
+    })());
+    return;
+  }
   event.respondWith((async () => {
-    try {
-      const res = await fetch(req);
-      if (res.ok) {
-        const c = await caches.open(VERSION);
-        c.put(req, res.clone());
-      }
-      return res;
-    } catch {
-      const hit = await caches.match(req, { ignoreSearch: true });
-      return hit || caches.match('./index.html');
-    }
+    const hit = await caches.match(req, { ignoreSearch: true });
+    const net = fromNetwork(req).catch(() => null);
+    if (hit) { event.waitUntil(net); return hit; }
+    return (await net) || Response.error();
   })());
 });
 
@@ -82,7 +95,12 @@ self.addEventListener('push', (event) => {
       ? [{ action: 'done', title: 'Sudah' }, { action: 'snooze', title: 'Tunda 30 mnt' }]
       : d.type === 'makan' ? [{ action: 'open', title: 'Catat sekarang' }] : [],
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  // Selalu tampilkan notifikasi (iPhone mencabut izin push kalau tidak ditampilkan).
+  // Kalau opsi tertentu tidak didukung browser, ulangi dengan opsi minimal.
+  event.waitUntil(
+    self.registration.showNotification(title, options)
+      .catch(() => self.registration.showNotification(title, { body: options.body, icon: options.icon, tag: options.tag, data: d }))
+  );
 });
 
 async function openApp(path) {

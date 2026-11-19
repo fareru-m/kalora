@@ -15,24 +15,40 @@ export const conn = {
   },
   enableDemo() { localStorage.setItem(K.demo, '1'); },
   reset() {
+    cache.clear();
     localStorage.removeItem(K.url);
     localStorage.removeItem(K.token);
     localStorage.removeItem(K.demo);
   },
 };
 
-export async function call(action, payload = {}) {
+// Cache lokal: data terakhir disimpan di HP supaya layar langsung tampil,
+// lalu diperbarui diam-diam dari server (stale-while-revalidate).
+const CK = 'kalora.cache.';
+export const cache = {
+  get(key) { try { return JSON.parse(localStorage.getItem(CK + key) || 'null'); } catch { return null; } },
+  set(key, val) { try { localStorage.setItem(CK + key, JSON.stringify(val)); } catch { /* penuh → abaikan */ } },
+  del(key) { localStorage.removeItem(CK + key); },
+  clear() { Object.keys(localStorage).filter((k) => k.startsWith(CK)).forEach((k) => localStorage.removeItem(k)); },
+};
+
+export async function call(action, payload = {}, { timeout = 45000 } = {}) {
   if (conn.demo) return demoCall(action, payload);
   let res;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     // Body string → Content-Type text/plain → tidak ada preflight CORS ke Apps Script
     res = await fetch(conn.url, {
       method: 'POST',
       body: JSON.stringify({ action, token: conn.token, ...payload }),
       redirect: 'follow',
+      signal: ctrl.signal,
     });
   } catch (e) {
-    throw new Error('Tidak bisa terhubung ke server. Cek internet atau URL Apps Script.');
+    throw new Error(e.name === 'AbortError' ? 'Server terlalu lama merespons. Coba lagi.' : 'Tidak bisa terhubung ke server. Cek internet atau URL Apps Script.');
+  } finally {
+    clearTimeout(timer);
   }
   if (!res.ok) throw new Error(`Server membalas ${res.status}.`);
   let data;
